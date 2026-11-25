@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+  <meta charset="utf-8">
+  <title>LiteDiff</title>
+  <script>document.write('<link rel="stylesheet" href="style.css?v=' + Date.now() + '">');</script>
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <section id="changes-section">
+        <div class="sidebar-header">
+          <span class="title">VÁLTOZÁSOK</span>
+          <span class="actions">
+            <button id="btn-collapse" title="Mind összecsuk / kibont">⇕</button>
+            <button id="btn-add" title="Repó hozzáadása (mappa; ha nem repó, az almappáiban lévő repók)">＋</button>
+          </span>
+        </div>
+        <div id="tree" tabindex="0"></div>
+        <div id="empty-hint" class="hidden">Adj hozzá egy repót a ＋ gombbal.</div>
+      </section>
+      <div id="hsplitter" title="Húzd a méretezéshez"></div>
+      <section id="commits-section">
+        <div class="sidebar-header" id="commits-header">
+          <span class="title">COMMITOK</span>
+          <span id="commits-repo"></span>
+          <span id="commits-base" title="Alapág – kattints a módosításhoz"></span>
+        </div>
+        <div id="commits" tabindex="0"></div>
+      </section>
+    </aside>
+    <div id="splitter"></div>
+    <main id="main">
+      <div id="editor-header">
+        <span id="file-title">Nincs megnyitott fájl</span>
+        <span id="file-actions">
+          <button id="btn-prev" title="Előző változás (Shift+F7)">↑</button>
+          <button id="btn-next" title="Következő változás (F7)">↓</button>
+          <button id="btn-inline" title="Egymás mellett / egy oszlopban">⇆</button>
+          <button id="btn-save" title="Mentés (Ctrl+S)" disabled>💾</button>
+        </span>
+      </div>
+      <div id="banner" class="hidden"></div>
+      <div id="editor"></div>
+      <div id="placeholder">Válassz egy fájlt a bal oldali listából.</div>
+    </main>
+  </div>
+  <script src="vendor/vs/loader.js"></script>
+  <script>document.write('<script src="app.js?v=' + Date.now() + '"><\/script>');</script>
+</body>
+</html>

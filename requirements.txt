@@ -1,0 +1,3 @@
+pywebview>=6
+pillow
+pytest
