@@ -123,7 +123,7 @@ def status_full(repo: str) -> dict:
     """Egyetlen git hívással: ág, HEAD, változások (porcelain v2)."""
     raw = run_git(repo, "status", "--porcelain=v2", "--branch", "-z", "--untracked-files=all")
     parts = raw.decode("utf-8", "replace").split("\0")
-    branch_name, head_sha = "?", ""
+    branch_name, head_sha, upstream = "?", "", ""
     changes: list[Change] = []
     untracked: list[str] = []
     i = 0
@@ -142,6 +142,9 @@ def status_full(repo: str) -> dict:
                 head_sha = entry[len("# branch.oid "):]
                 if head_sha == "(initial)":
                     head_sha = ""
+            elif entry.startswith("# branch.upstream ") or entry.startswith("# branch.ab "):
+                # távoli ág és előny/lemaradás: push vagy fetch után ez változik, a HEAD nem
+                upstream = (upstream + " " + entry[len("# branch."):]).strip()
             continue
         if kind == "?":
             untracked.append(entry[2:])
@@ -177,7 +180,8 @@ def status_full(repo: str) -> dict:
             status_kind = "modified"
         changes.append(Change(path=path, status=status_kind, orig_path=orig if status_kind == "renamed" else None))
     changes.sort(key=lambda c: c.path.lower())
-    return {"branch": branch_name, "head": head_sha, "changes": [asdict(c) for c in changes], "untracked": untracked}
+    return {"branch": branch_name, "head": head_sha, "upstream": upstream,
+            "changes": [asdict(c) for c in changes], "untracked": untracked}
 
 def status_dicts(repo: str) -> list[dict]:
     return [asdict(c) for c in status(repo)]

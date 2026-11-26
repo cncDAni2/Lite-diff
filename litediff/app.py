@@ -87,7 +87,7 @@ class Api:
         return self._base_cache[key]
 
     def _repo_info(self, repo: str) -> dict:
-        info = {"path": repo, "name": os.path.basename(repo), "branch": "?", "head": "",
+        info = {"path": repo, "name": os.path.basename(repo), "branch": "?", "head": "", "upstream": "",
                 "changes": [], "error": None, "compare": None}
         if not os.path.isdir(repo):
             info["error"] = "A mappa nem található."
@@ -95,6 +95,7 @@ class Api:
         try:
             st = gitops.status_full(repo)
             info["branch"], info["head"], info["changes"] = st["branch"], st["head"], st["changes"]
+            info["upstream"] = st.get("upstream", "")
             if self._compare_enabled(repo):
                 base = self._base(repo, info["branch"], info["head"])
                 mb = self._merge_base(repo, base["name"], info["head"]) if base["name"] else ""
@@ -162,11 +163,13 @@ class Api:
         return self._repo_info(repo)
 
     # --- commitok ---
-    def history(self, repo: str, skip: int = 0) -> dict:
+    def history(self, repo: str, skip: int = 0, limit: int = 50) -> dict:
+        # a háttérfrissítés a már betöltött darabszámot kéri le újra, hogy a „Továbbiak” se vesszen el
+        limit = max(1, min(int(limit), 1000))
         try:
             branch = gitops.branch(repo)
             base = self._base(repo, branch, gitops.head(repo))
-            data = history.log(repo, base["name"], skip, 50)
+            data = history.log(repo, base["name"], skip, limit)
         except gitops.GitError as exc:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "repo": repo, "branch": branch, "base": base["name"], "base_source": base["source"], **data}
@@ -309,7 +312,8 @@ class Api:
         for repo in repos:
             info = self._repo_info(repo)
             mtimes = [gitops.mtime(repo, c["path"]) for c in info["changes"]]
-            signature = json.dumps([info["branch"], info["head"], info["error"], info["compare"], info["changes"], mtimes])
+            signature = json.dumps([info["branch"], info["head"], info["upstream"], info["error"], info["compare"],
+                                    info["changes"], mtimes])
             if self._signatures.get(repo) != signature:
                 if repo in self._signatures:
                     changed.append(info)
@@ -367,6 +371,7 @@ def main() -> None:    # kisebb memória: GPU-folyamat nélkül, egyetlen megjel
         width=layout.get("width", 1500),
         height=layout.get("height", 900),
         min_size=(700, 400),
+        maximized=True,
         background_color="#1e1e1e",
         text_select=True,
     )

@@ -22,9 +22,13 @@ const state = {
   revealPending: false,
   activeRepo: localStorage.getItem('activeRepo') || null,
   history: null,             // {repo, branch, base, base_source, commits, more}
-  expanded: new Set(),       // kinyitott commitok (sha)
-  commitFiles: new Map(),    // sha -> fájlok
-  historyLoading: false,
+  expanded: new Set(),       // kinyitott commitok (sha) az aktív repóban
+  commitFiles: new Map(),    // sha -> fájlok (a commit tartalma nem változik, ezért nem kell üríteni)
+  historyCache: new Map(),   // repó -> utoljára betöltött history (repóváltáskor azonnal ezt mutatjuk)
+  expandedByRepo: new Map(), // repó -> kinyitott commitok
+  historySeq: new Map(),     // repó -> a legutóbbi frissítési kérés sorszáma (a régebbi válasz eldobható)
+  refreshing: new Set(),     // repók, amelyeknél épp háttérfrissítés fut
+  loadingMore: false,
 };
 
 let api;
@@ -47,8 +51,32 @@ async function start() {
   await loadMonaco();
   state.repos = await api.repos();
   if (!state.repos.some(r => r.path === state.activeRepo)) state.activeRepo = state.repos.length ? state.repos[0].path : null;
+  if (state.activeRepo) state.expandedByRepo.set(state.activeRepo, state.expanded);
   renderTree();
   loadHistory(true);
+  setTimeout(prefetchHistories, 2000);
+}
+
+// indulás után a háttérben, egymás után, kis szünetekkel lekérjük a többi repó commitlistáját is,
+// hogy repóváltáskor már ne kelljen várni
+async function prefetchHistories() {
+  for (const repo of state.repos.slice()) {
+    if (repo.error || repo.path === state.activeRepo) continue;
+    if (state.historyCache.has(repo.path) || state.historySeq.has(repo.path)) continue;
+    const seq = 1;
+    state.historySeq.set(repo.path, seq);
+    let res;
+    try { res = await api.history(repo.path, 0, 50); } catch (e) { res = { ok: false }; }
+    if (state.historySeq.get(repo.path) === seq) {   // közben nem kérte le más (pl. repóváltás)
+      if (res.ok) {
+        state.historyCache.set(repo.path, res);
+        if (state.activeRepo === repo.path) { state.history = res; renderCommits(); }
+      } else {
+        state.historySeq.delete(repo.path);
+      }
+    }
+    await new Promise(r => setTimeout(r, 400));
+  }
 }
 
 function loadMonaco() {
@@ -112,6 +140,7 @@ function setupButtons() {
     diffEditor && diffEditor.updateOptions({ renderSideBySide: state.sideBySide });
   };
   $('commits-base').onclick = e => { e.stopPropagation(); pickBase(state.activeRepo, $('commits-base')); };
+  $('btn-refresh-commits').onclick = e => { e.stopPropagation(); loadHistory(false); };
   window.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveCurrent(); }
     else if (e.key === 'F7') { e.preventDefault(); goToChange(e.shiftKey ? -1 : 1); }
@@ -360,30 +389,59 @@ function setActiveRepo(path) {
   if (state.activeRepo === path && state.history && state.history.repo === path) return;
   state.activeRepo = path;
   if (path) localStorage.setItem('activeRepo', path); else localStorage.removeItem('activeRepo');
-  state.expanded.clear();
-  state.commitFiles.clear();
+  // amit már ismerünk, azt azonnal mutatjuk, a frissítés a háttérben fut
+  state.history = path ? state.historyCache.get(path) || null : null;
+  if (path && !state.expandedByRepo.has(path)) state.expandedByRepo.set(path, new Set());
+  state.expanded = path ? state.expandedByRepo.get(path) : new Set();
   document.querySelectorAll('#tree .row.repo').forEach(r => r.classList.toggle('active-repo', r.title === path));
-  loadHistory(true);
+  renderCommits();
+  // a figyelő minden commitot, ágváltást és push/fetch-et jelez, így a meglévő lista mindig friss
+  const cached = path ? state.historyCache.get(path) : null;
+  if (!cached || cached.error || cached.stale) loadHistory(true);
 }
 
 async function loadHistory(reset, { more = false } = {}) {
   const repoPath = state.activeRepo;
   if (!repoPath) { state.history = null; renderCommits(); return; }
-  if (state.historyLoading && more) return;
-  state.historyLoading = true;
-  if (reset && (!state.history || state.history.repo !== repoPath)) { state.history = null; renderCommits(); }
-  const skip = more && state.history ? state.history.commits.length : 0;
-  const res = await api.history(repoPath, skip);
-  state.historyLoading = false;
-  if (state.activeRepo !== repoPath) return;
-  if (!res.ok) { state.history = { repo: repoPath, error: res.error, commits: [] }; renderCommits(); return; }
-  if (more && state.history && state.history.repo === repoPath) {
-    state.history.commits.push(...res.commits);
-    state.history.more = res.more;
-  } else {
-    state.history = res;
+  const known = state.history && state.history.repo === repoPath && !state.history.error ? state.history : null;
+  if (more) {
+    if (state.loadingMore || !known) return;
+    state.loadingMore = true;
+    const res = await api.history(repoPath, known.commits.length, 50);
+    state.loadingMore = false;
+    if (!res.ok || state.historyCache.get(repoPath) !== known) return;
+    known.commits.push(...res.commits);
+    known.more = res.more;
+    if (state.activeRepo === repoPath) renderCommits();
+    return;
   }
+  // frissítés: a már betöltött darabszámot kérjük le újra; a régi lista addig látszik
+  const seq = (state.historySeq.get(repoPath) || 0) + 1;
+  state.historySeq.set(repoPath, seq);
+  state.refreshing.add(repoPath);
+  updateRefreshButton();
+  const limit = Math.max(50, known ? known.commits.length : 0);
+  let res;
+  try {
+    res = await api.history(repoPath, 0, limit);
+  } finally {
+    if (state.historySeq.get(repoPath) === seq) state.refreshing.delete(repoPath);
+    updateRefreshButton();
+  }
+  if (state.historySeq.get(repoPath) !== seq) return;   // közben újabb frissítés indult
+  const fresh = res.ok ? res : { repo: repoPath, error: res.error, commits: [] };
+  state.historyCache.set(repoPath, fresh);
+  if (state.activeRepo !== repoPath) return;
+  state.history = fresh;
   renderCommits();
+}
+
+function updateRefreshButton() {
+  const btn = $('btn-refresh-commits');
+  const busy = !!state.activeRepo && state.refreshing.has(state.activeRepo);
+  btn.classList.toggle('spin', busy);
+  btn.disabled = !state.activeRepo;
+  btn.title = busy ? 'Commitok frissítése folyamatban' : 'Commitok frissítése';
 }
 
 function renderCommits() {
@@ -393,8 +451,11 @@ function renderCommits() {
   const repo = findRepo(state.activeRepo);
   const h = state.history;
   $('commits-repo').textContent = repo ? `${repo.name} ⎇ ${repo.branch}` : '';
-  $('commits-base').textContent = h && h.repo === state.activeRepo ? 'alap: ' + (shortRef(h.base) || '?') + ' ▾' : '';
-  $('commits-base').title = h && h.base ? `Alapág: ${shortRef(h.base)} (${h.base_source}). Kattints a módosításhoz.` : 'Alapág – kattints a beállításhoz';
+  // az alapág csak ikon; a neve a súgóban látszik
+  const baseBtn = $('commits-base');
+  baseBtn.classList.toggle('hidden', !(h && h.repo === state.activeRepo && !h.error));
+  baseBtn.title = h && h.base ? `Alapág: ${shortRef(h.base)} (${h.base_source})\nKattints a módosításhoz.` : 'Alapág – kattints a beállításhoz';
+  updateRefreshButton();
   if (!repo) { box.append(el('div', 'clean', 'Kattints egy repóra.')); return; }
   if (!h) { box.append(el('div', 'clean', 'Betöltés')); return; }
   if (h.error) { box.append(el('div', 'error', h.error)); return; }
@@ -661,7 +722,7 @@ function closeBranchMenu() {
   if (branchMenu) { branchMenu.remove(); branchMenu = null; }
 }
 
-async function branchPicker(repoPath, anchor, { onPick, extra = [], markCurrent = null }) {
+async function branchPicker(repoPath, anchor, { onPick, extra = [], markCurrent = null, header = null }) {
   closeBranchMenu();
   closeContextMenu();
   const menu = el('div', 'branch-menu');
@@ -670,6 +731,7 @@ async function branchPicker(repoPath, anchor, { onPick, extra = [], markCurrent 
   filter.placeholder = 'Ág keresése';
   const list = el('div', 'branch-list');
   list.append(el('div', 'branch-info', 'Betöltés'));
+  if (header) menu.append(header);
   menu.append(filter, list);
   document.body.append(menu);
   const r = anchor.getBoundingClientRect();
@@ -745,7 +807,12 @@ async function switchBranch(repo, name, isRemote, isCurrent) {
 function pickBase(repoPath, anchor) {
   if (!repoPath) return;
   const h = state.history;
+  const header = el('div', 'branch-header');
+  header.append(el('span', 'branch-header-label', 'Jelenlegi alapág'),
+    el('span', 'branch-header-name', h && h.base ? shortRef(h.base) : 'nincs'));
+  if (h && h.base_source) header.append(el('span', 'branch-header-source', h.base_source));
   branchPicker(repoPath, anchor, {
+    header,
     markCurrent: h ? shortRef(h.base) : '',
     extra: [{ label: '🔍 Automatikus felismerés', onClick: () => setBase(repoPath, null) }],
     onPick: name => { closeBranchMenu(); setBase(repoPath, name); },
@@ -933,7 +1000,10 @@ window.liteDiff = {
       if (i < 0) continue;
       const before = state.repos[i];
       state.repos[i] = info;
-      if (info.path === state.activeRepo && (before.head !== info.head || before.branch !== info.branch)) historyChanged = true;
+      if (before.head !== info.head || before.branch !== info.branch || before.upstream !== info.upstream) {
+        // nem aktív repó listája elavult: megnyitáskor még látszik, és a háttérben frissül
+        if (info.path === state.activeRepo) historyChanged = true; else if (state.historyCache.has(info.path)) state.historyCache.get(info.path).stale = true;
+      }
       if (cur && cur.mode === 'work' && info.path === cur.repo) {
         const was = before.changes.find(c => c.path === cur.change.path);
         const now = info.changes.find(c => c.path === cur.change.path);
@@ -947,7 +1017,7 @@ window.liteDiff = {
     }
     renderTree();
     renderCommits();
-    if (historyChanged) { state.commitFiles.clear(); loadHistory(false); }
+    if (historyChanged) loadHistory(false);
     if (reopen && !isDirty()) openFile(cur.repo, reopen, { silent: true });
   },
   onFileChanged(repo, path) {
